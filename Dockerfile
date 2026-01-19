@@ -1,24 +1,30 @@
 # Build image
-FROM alpine:3.22 as build
+FROM alpine:3.22 AS build
 
-ARG REPOSITORY
-ARG VERSION
+ARG REPOSITORY=https://github.com/writefreely/writefreely.git
+ARG VERSION=main
 
-ENV GOPATH /go
-ENV PATH $GOPATH/bin:$PATH
-ENV GO111MODULE=on
+RUN apk add --no-cache \
+    ca-certificates \
+    git \
+    go \
+    build-base \
+    nodejs \
+    npm
 
-RUN echo "@community http://dl-cdn.alpinelinux.org/alpine/v3.22/community" >> /etc/apk/repositories && \
-    apk add --no-cache nodejs-current npm go make g++ git && \
-    npm install -g less less-plugin-clean-css
+RUN npm install -g less less-plugin-clean-css
 
-WORKDIR /tmp
+WORKDIR /src
 
-RUN git clone https://github.com/writefreely/writefreely.git
+RUN git init writefreely && \
+    cd writefreely && \
+    git remote add origin "${REPOSITORY}" && \
+    git fetch --depth 1 origin "${VERSION}" && \
+    git checkout -q FETCH_HEAD
 
-WORKDIR /tmp/writefreely
+WORKDIR /src/writefreely
 
-RUN go build -v -tags='sqlite' ./cmd/writefreely/
+RUN go build -trimpath -ldflags "-s -w" -tags='sqlite' -o /out/writefreely ./cmd/writefreely/
 
 RUN cd less && \
     CSSDIR=../static/css && \
@@ -29,20 +35,27 @@ RUN cd less && \
 
 RUN cd prose && \
     export NODE_OPTIONS=--openssl-legacy-provider && \
-    npm install && \
+    npm ci && \
     npm run-script build
 
 # Final image
 FROM alpine:3.22
 
-RUN apk add --no-cache openssl ca-certificates
+RUN apk add --no-cache openssl ca-certificates wget
 
-COPY --from=build /tmp/writefreely /writefreely
-COPY bin/run.sh /writefreely/
+COPY --from=build /out/writefreely /writefreely/writefreely
+COPY --from=build /src/writefreely/templates /writefreely/templates
+COPY --from=build /src/writefreely/pages /writefreely/pages
+COPY --from=build /src/writefreely/static /writefreely/static
+COPY bin/entrypoint.sh /writefreely/
+RUN chmod +x /writefreely/entrypoint.sh
 
 WORKDIR /writefreely
 VOLUME /data
 VOLUME /config
 EXPOSE 8080
 
-ENTRYPOINT ["/writefreely/run.sh"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/writefreely/entrypoint.sh"]
